@@ -1,11 +1,16 @@
+#include "heltec.h"
 #include <WiFi.h>
 #include "FS.h"
 #include "SPIFFS.h"
+#include "oled.hpp"
 
 // todo:
 // give the access point a custom name "LoRaFC-Ground"
 // give the host a name "ATC"
 // display IP number and name on OLED
+
+// OLED display
+HeltecOLED *oled;
 
 // web server
 WiFiServer *server;
@@ -15,8 +20,24 @@ String templ;
 String page;
 
 // Auxiliar variables to store the current output state
-int output25State = 0;
-const int output25 = 25;
+int LEDState = 0;
+volatile int countISR = 0;
+volatile int uptime = 0;
+static hw_timer_t * timer = NULL;
+static portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
+
+void IRAM_ATTR onTimer()
+{
+    // disable ISR and other tasks
+    portENTER_CRITICAL_ISR(&timerMux);
+    countISR++;
+    if (countISR>=1000)
+    {
+        countISR = 0;
+        uptime++;
+    };
+    portEXIT_CRITICAL_ISR(&timerMux);
+}
 
 // handle the HTTP request
 // The internal state changes depending on the commands present in the request.
@@ -29,13 +50,13 @@ void handle_request()
     // turn the GPIO on/off
     if (request.indexOf("GET /25/on") >= 0)
     {
-        output25State = 1;
-        digitalWrite(output25, HIGH);
+        LEDState = 1;
+        digitalWrite(LED, HIGH);
     };
     if (request.indexOf("GET /25/off") >= 0)
     {
-        output25State = 0;
-        digitalWrite(output25, LOW);
+        LEDState = 0;
+        digitalWrite(LED, LOW);
     };
 }
 
@@ -43,8 +64,11 @@ void handle_request()
 // into the response template
 void fill_template()
 {
+    char line[80];
     page = templ;
-    if (output25State)
+    sprintf(line,"up time %d:%02d<br>\n",uptime / 60, uptime % 60);
+    page.replace("%UPTIME%",line);
+    if (LEDState)
     {
         page.replace("%GPIO25STATE%","<p>GPIO 25 - State ON </p>");
         page.replace("%GPIO25BUTTON%","<p><a href=\"/25/off\"><button class=\"button\">OFF</button></a></p>");
@@ -58,10 +82,27 @@ void fill_template()
 
 void setup()
 {
+    // init display
+    oled = new HeltecOLED();
+    oled -> init();
+    oled -> flipScreenVertically();
+    oled -> setFont(ArialMT_Plain_10);
+    oled -> drawString(0, 0, "Access Point");
+    oled -> display();
+
+    // use timer 0, prescaler 80, counting up from zero
+    timer = timerBegin(0, 80, true);
+    // attach onTimer function to our timer, edge type
+    timerAttachInterrupt(timer, &onTimer, true);
+    // set alarm, time in microseconds, repeat
+    timerAlarmWrite(timer, 1000, true);
+    // Start an alarm
+    timerAlarmEnable(timer);
+
     Serial.begin(115200);
     // Initialize the output variables as outputs
-    pinMode(output25, OUTPUT);
-    digitalWrite(output25, LOW);
+    pinMode(LED, OUTPUT);
+    digitalWrite(LED, LOW);
 
     // initialize file system
     if(!SPIFFS.begin())
@@ -96,6 +137,14 @@ void setup()
     // setup HTTP server on port 80
     server = new WiFiServer(80);
     server->begin();
+
+    // show access point details
+    char message[32];
+    sprintf(message,"server: %s", IP.toString().c_str());
+    // sprintf(message,"server: ", IP);
+    oled -> drawString(0, 12, message);
+    oled -> display();
+    
 }
 
 void loop(){
